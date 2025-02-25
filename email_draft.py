@@ -1,94 +1,45 @@
 import streamlit as st
 import base64
-import json
-import socket
-import time
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
-import pandas as pd
-from datetime import datetime
 
-# Define scopes
-SCOPES = ['https://www.googleapis.com/auth/gmail.compose']
+# Update scopes to include gmail.modify which is required for drafts
+SCOPES = [
+    'https://www.googleapis.com/auth/gmail.compose',
+    'https://www.googleapis.com/auth/gmail.send',
+    'https://www.googleapis.com/auth/gmail.modify'  # Added this scope
+]
 
-def get_gmail_service(max_retries=3):
-    """Initialize Gmail service with OAuth2 and retry logic"""
-    for attempt in range(max_retries):
+def get_gmail_service():
+    """Initialize Gmail service with token-based authentication"""
+    try:
+        # Create credentials directly from tokens - simplified approach
+        creds = Credentials(
+            token=st.secrets["gmail_token"]["token"],
+            refresh_token=st.secrets["gmail_token"]["refresh_token"],
+            token_uri=st.secrets["gmail_token"]["token_uri"],
+            client_id=st.secrets["gmail_token"]["client_id"],
+            client_secret=st.secrets["gmail_token"]["client_secret"],
+            scopes=SCOPES  # Use the defined SCOPES directly
+        )
+        
+        # Build the service
+        service = build('gmail', 'v1', credentials=creds)
+        return service
+            
+    except Exception as e:
+        st.error(f"Gmail service initialization error: {str(e)}")
+        # Debug information
+        st.error("Checking credentials configuration:")
         try:
-            creds = None
-            
-            if 'gmail_token' in st.session_state:
-                creds = Credentials.from_authorized_user_info(
-                    json.loads(st.session_state['gmail_token']), 
-                    SCOPES
-                )
-            
-            if not creds or not creds.valid:
-                if creds and creds.expired and creds.refresh_token:
-                    try:
-                        creds.refresh(Request())
-                    except Exception as e:
-                        st.warning("Token refresh failed, attempting reauthorization...")
-                        creds = None
-                
-                if not creds:
-                    try:
-                        client_config = {
-                            "installed": {
-                                "client_id": st.secrets["gmail_credentials"]["client_id"],
-                                "client_secret": st.secrets["gmail_credentials"]["client_secret"],
-                                "project_id": st.secrets["gmail_credentials"]["project_id"],
-                                "auth_uri": st.secrets["gmail_credentials"]["auth_uri"],
-                                "token_uri": st.secrets["gmail_credentials"]["token_uri"],
-                                "auth_provider_x509_cert_url": st.secrets["gmail_credentials"]["auth_provider_x509_cert_url"],
-                                "redirect_uris": ["http://localhost:8502"]
-                            }
-                        }
-                        
-                        flow = InstalledAppFlow.from_client_config(
-                            client_config, 
-                            SCOPES,
-                            redirect_uri='http://localhost:8502'
-                        )
-                        
-                        try:
-                            port_number = 8502
-                            creds = flow.run_local_server(
-                                port=port_number,
-                                access_type='offline',
-                                prompt='consent'
-                            )
-                            # Save the credentials for future use
-                            st.session_state['gmail_token'] = creds.to_json()
-                            
-                        except socket.error:
-                            st.error(f"Port {port_number} is in use. Please try again in a few minutes.")
-                            return None
-                            
-                    except Exception as e:
-                        st.error(f"Authentication failed: {str(e)}")
-                        if attempt < max_retries - 1:
-                            time.sleep(2)
-                            continue
-                        return None
-            
-            service = build('gmail', 'v1', credentials=creds)
-            # Test the connection
-            service.users().getProfile(userId='me').execute()
-            return service
-            
-        except Exception as e:
-            if attempt < max_retries - 1:
-                st.warning(f"Attempt {attempt + 1} failed, retrying...")
-                time.sleep(2)
-                continue
-            st.error(f"Failed to initialize Gmail service after {max_retries} attempts: {str(e)}")
-            return None
+            for key in ["token_uri", "client_id"]:
+                st.write(f"{key}: {st.secrets['gmail_token'][key]}")
+        except Exception as debug_e:
+            st.error(f"Debug error: {str(debug_e)}")
+        return None
 
 def create_settlement_template(currency, value):
     """Create settlement email template with proper formatting"""
@@ -130,65 +81,58 @@ Should you have any questions, please feel free to contact us."""
 
     return subject, body, html_body
 
-def create_draft_email(service, files, email_data, max_retries=3):
-    """Create email draft with attachments and retry logic"""
-    for attempt in range(max_retries):
-        try:
-            message = MIMEMultipart('alternative')
-            message['cc'] = 'ops@wmcubehk.com, finance@wmcubehk.com'
-            message['subject'] = email_data['subject']
-            
-            # Add plain text and HTML versions
-            part1 = MIMEText(email_data['body'], 'plain', 'utf-8')
-            part2 = MIMEText(email_data['html_body'], 'html', 'utf-8')
-            
-            message.attach(part1)
-            message.attach(part2)
-            
-            # Add attachments with error handling
-            for file_info in files:
-                try:
-                    attachment = MIMEApplication(file_info['content'], _subtype='pdf')
-                    attachment.add_header(
-                        'Content-Disposition', 
-                        'attachment', 
-                        filename=file_info['filename']
-                    )
-                    message.attach(attachment)
-                except Exception as e:
-                    st.error(f"Error attaching file {file_info['filename']}: {str(e)}")
-                    continue
-            
-            raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
-            
-            draft = service.users().drafts().create(
-                userId='me',
-                body={'message': {'raw': raw_message}}
-            ).execute()
-            
-            return draft['id']
+def create_draft_email(service, files, email_data):
+    """Create email draft with attachments"""
+    try:
+        message = MIMEMultipart('alternative')
+        message['cc'] = 'ops@wmcubehk.com, finance@wmcubehk.com'
+        message['subject'] = email_data['subject']
         
-        except Exception as e:
-            if attempt < max_retries - 1:
-                st.warning(f"Attempt {attempt + 1} failed, retrying...")
-                time.sleep(2)
+        # Add plain text and HTML versions
+        part1 = MIMEText(email_data['body'], 'plain', 'utf-8')
+        part2 = MIMEText(email_data['html_body'], 'html', 'utf-8')
+        
+        message.attach(part1)
+        message.attach(part2)
+        
+        # Add attachments
+        for file_info in files:
+            try:
+                # If file_info is a dict with 'content' key
+                if isinstance(file_info, dict) and 'content' in file_info:
+                    content = file_info['content']
+                    filename = file_info['filename']
+                else:
+                    # If file_info is a FileUploader object
+                    content = file_info.read()
+                    filename = file_info.name
+                    
+                attachment = MIMEApplication(content, _subtype='pdf')
+                attachment.add_header(
+                    'Content-Disposition', 
+                    'attachment', 
+                    filename=filename
+                )
+                message.attach(attachment)
+            except Exception as e:
+                st.error(f"Error attaching file {filename}: {str(e)}")
                 continue
-            st.error(f"Failed to create draft after {max_retries} attempts: {str(e)}")
-            return None
-
-def reset_gmail_auth():
-    """Reset Gmail authentication"""
-    if 'gmail_token' in st.session_state:
-        del st.session_state['gmail_token']
-    st.success("Gmail authentication has been reset. Please authenticate again.")
-    st.experimental_rerun()
+        
+        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+        
+        draft = service.users().drafts().create(
+            userId='me',
+            body={'message': {'raw': raw_message}}
+        ).execute()
+        
+        return draft['id']
+    
+    except Exception as e:
+        st.error(f"Failed to create draft: {str(e)}")
+        return None
 
 def main():
     st.title('Email Draft Generator')
-    
-    # Add authentication reset button in sidebar
-    if st.sidebar.button('Reset Gmail Authentication'):
-        reset_gmail_auth()
 
     service = get_gmail_service()
     if not service:
