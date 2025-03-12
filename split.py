@@ -48,6 +48,7 @@ def get_gemini_response(image):
            - BOCI Prudential Asset Management Limited → BOCIP
            - FH-Peak/Belgrave → Belgrave
            - FH-Everbright/Broker → Everbright
+           - FH-NJ/ → Nanjia
 
         4. Extract Currency from 'Currency :' field (USD/HKD/JPY)
 
